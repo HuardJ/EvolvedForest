@@ -17,91 +17,24 @@ def var(X):
     return output
 
 
-def splits_per_col(dataframe,col_index):
+def splits_per_col(dataframe,col_index,min_samples_leaf = 1):
     
-    splits = list(dataframe.iloc[:,col_index].drop_duplicates())
+    column_name = dataframe.columns[col_index]
     
-    #Remove Largest value from list, unecessary for split:
-    splits.remove(max(splits))
+    splits = dataframe.sort_values(column_name).reset_index(drop = True).iloc[min_samples_leaf-1:-min_samples_leaf,col_index].drop_duplicates()    
     
-    return splits
+    return list(splits)
 
 
 def splits_all_cols(dataframe):
     
     splits = dict()
     
-    n_cols = len(list(dataframe))
-    
-    for i in range(n_cols):
-        splits[str(i)] = list(dataframe.iloc[:,i].drop_duplicates())
+    for i in range(len(dataframe.columns)):
+        
+        splits[i] = list(dataframe.iloc[:,i].drop_duplicates())
         
     return splits
-
-
-def split_col(dataframe,col_index,split_val):
-    col_name = list(dataframe)[col_index]
-    
-    leq = dataframe.loc[dataframe[col_name] <= split_val, col_name]
-    gr = dataframe.loc[dataframe[col_name] > split_val, col_name]
-    
-    return gr,leq
-
-
-def split_df(dataframe,col_index,split_val):
-    col_name = list(dataframe)[col_index]
-    
-    leq = dataframe.loc[dataframe[col_name] <= split_val,:]
-    gr = dataframe.loc[dataframe[col_name] > split_val,:]
-    
-    return gr, leq
-
-
-def calculate_overall_metric(greater,leq,metric = var):
-    N = len(greater) + len(leq)
-    
-    p_greater = len(greater) / N
-    p_leq = len(leq) / N
-    
-    overall_metric = p_greater * metric(greater) + p_leq * metric(leq)
-    
-    return overall_metric
-
-
-def best_split_col(dataframe, col_index, return_error = False):
-    potential_splits = splits_per_col(dataframe,col_index)
-    
-    split_winner = None
-    mse_winner = None
-    for el in potential_splits:
-        above, below = split_df(dataframe,col_index,el)
-        
-        mse_challenger = calculate_overall_metric(above.iloc[:,-1],below.iloc[:,-1])
-        
-        if (split_winner is None) or (mse_challenger < mse_winner):
-            split_winner = el
-            mse_winner = mse_challenger
-            
-        if return_error:
-            return split_winner,mse_winner
-        else: return split_winner
-
-
-def best_split_all_features(dataframe):
-    
-    col_winner = None
-    split_winner = None
-    mse_winner = None
-    for col_index in range(dataframe.shape[1]):
-        
-        split_challenger,mse_challenger = best_split_col(dataframe,col_index,return_error = True)
-        
-        if (split_winner is None) or (mse_challenger < mse_winner):
-            col_winner = col_index
-            split_winner = split_challenger
-            mse_winner = mse_challenger
-            
-    return col_winner,split_winner
 
 
 def enumerate_features(train_data,n_estimators):
@@ -133,28 +66,155 @@ def feature_combinations(train_data,depth):
 
 
 class Node:
-    def __init__(self,idx = None,left = None,right = None,feat = None,
-                 thresh = None,n_samples = None,imp = None,l_r_slice = None,
-                 out_val = None):
+    def __init__(self,index = None,child_left = None,child_right = None,feature = None,
+                 threshold = None,n_samples = None,impurity = None,train_df_slice = None,
+                 val_df_slice = None,output_value = None,metric = var, evolution = False):
         
-        self.index = idx
-        self.child_left = left
-        self.child_right = right
-        self.feature = feat
-        self.threshold = thresh
-        self.n_node_samples = n_samples
-        self.impurity = imp
-        self.data_slices = l_r_slice 
-        self.output_value = out_val
+        self.index = index
+        self.child_left = child_left
+        self.child_right = child_right
+        self.feature = feature
+        self.threshold = threshold
+        
+        if n_samples is None and train_df_slice is not None:
+            self.n_samples = len(train_df_slice)
+        else: 
+            self.n_samples = n_samples
+        
+        self.impurity = impurity
+        self.train_df_slice = train_df_slice
+        self.val_df_slice = val_df_slice
+        self.output_value = output_value
+        self.metric = metric
+        self.evolution = evolution
+
+
+    def split_training(self,col_index,split_val):
+        
+        col_name = self.train_df_slice.columns[col_index]
+        
+        leq = self.train_df_slice.loc[self.train_df_slice[col_name] <= split_val,:]
+        gr = self.train_df_slice.loc[self.train_df_slice[col_name] > split_val,:]
+        
+        return gr, leq
+
+
+    def split_validation(self,col_index,split_val):
+        
+        col_name = self.val_df_slice.columns[col_index]
+        
+        leq = self.train_df_slice.loc[self.val_df_slice[col_name] <= split_val,:]
+        gr = self.train_df_slice.loc[self.val_df_slice[col_name] > split_val,:]
+        
+        return gr, leq
+
+
+    def calculate_overall_metric(self,greater,leq):
+        N = len(greater) + len(leq)
+        
+        p_greater = len(greater) / N
+        p_leq = len(leq) / N
+        
+        overall_metric = p_greater * self.metric(greater) + p_leq * self.metric(leq)
+        gr_mean = mean(greater)
+        leq_mean = mean(leq)
+            
+        return overall_metric,gr_mean,leq_mean
+        
+        
+    def best_split_col(self, col_index, min_samples_leaf = 1):
+        potential_splits = splits_per_col(self.train_df_slice,col_index,min_samples_leaf = min_samples_leaf)
+        
+        split_winner = None
+        mse_winner = None
+        gr_node_val = None
+        leq_node_val = None
+        for el in potential_splits:
+            above, below = self.split_training(col_index,el)
+            
+            mse_challenger,gr_mean,leq_mean = self.calculate_overall_metric(above.iloc[:,-1],below.iloc[:,-1],True)
+                
+            if (split_winner is None) or (mse_challenger < mse_winner):
+                
+                split_winner = el
+                mse_winner = mse_challenger
+                gr_node_val = gr_mean
+                leq_node_val = leq_mean
+            
+        return split_winner,mse_winner,gr_node_val,leq_node_val
+        
+        
+    def all_features_best_splits(self,min_samples_leaf = 1):
+    
+        splits = []
+        errors = []
+        gr_node_out = []
+        leq_node_out = []
+        
+        if self.evolution:
+            validation_sum_residual_squares = []
+        
+        for col_index in range(self.train_df_slice.shape[1]):
+            
+            split, mse, gr_out, leq_out = self.best_split_col(col_index,
+                                                              min_samples_leaf = min_samples_leaf)
+            
+            splits.append(split)
+            errors.append(mse)
+            gr_node_out.append(gr_out)
+            leq_node_out.append(leq_out)
+            
+            if self.evolution:
+                val_above, val_below = self.split_validation(col_index,split)
+                
+                val_sum_res_sq_above = sum(val_above.iloc[:,-1].apply(lambda x : (x - gr_out)**2))
+                val_sum_res_sq_below = sum(val_below.iloc[:,-1].apply(lambda x : (x - leq_out)**2))
+                
+                validation_sum_residual_squares.append(val_sum_res_sq_above + val_sum_res_sq_below)
+                
+        if self.evolution:
+            
+            output = sorted(zip(splits,
+                                errors,
+                                gr_node_out,
+                                leq_node_out,
+                                validation_sum_residual_squares),
+                            key = lambda x : x[-1],
+                            reverse = True)
+            
+        else:
+            
+            output = min(zip(splits,
+                             errors,
+                             gr_node_out,
+                             leq_node_out),
+                         key = lambda x : x[1])
+            
+        return output
         
 
 class Tree:
-    def __init__(self,nods = None,change = None):
-        self.nodes = nods
-        self.changed = change
+    def __init__(self,nodes = None,changed = None):
+        self.nodes = nodes
+        self.changed = changed
+        
+        
+    def next_gen(self,min_samples_split = 2,min_samples_leaf = 1):
+        
+        nodes_to_split = [el for el in self.nodes 
+                          if el.feature is None
+                          and len(el.train_df_slice) > min_samples_leaf]
+                
+        for node in nodes_to_split:
+            
+            splits,gr_node_out,leq_node_out = node.all_features_best_splits(min_samples_leaf)
+            
+            for i in range(len(splits)):
+                
+                val_above,val_below = split_df(node.val_df_slice,i,splits[i])
     
     
-    def grow_specific(self,data,features,min_samples_split = 2,min_samples_leaf = 1):
+    def grow_specific(self,train_df,validation_df,features,min_samples_split = 2,min_samples_leaf = 1):
         if type(features) is not list:
             features = [features]
         
@@ -162,52 +222,66 @@ class Tree:
         for feature in features:
             #print('Build node for ',feature)
             if self.nodes is None:
-                split,mse = best_split_col(data,feature,True)
-                above,below = split_df(data,feature,split)
                 
-                self.nodes = [Node(0,feat = feature,thresh = split,n_samples = len(data),
-                                   imp = mse,l_r_slice = (below,above),
-                                   out_val = mean(data.iloc[:,-1]))]
+                split,mse = best_split_col(train_df,feature,True)
+                train_above,train_below = split_df(train_df,feature,split)
+                validation_above,validation_below = split_df(validation_df,feature,split)
+                
+                self.nodes = [Node(index = 0,
+                                   feature = feature,
+                                   threshold = split,
+                                   n_samples = len(train_df),
+                                   impurity = mse,
+                                   output_value = mean(train_df.iloc[:,-1]),
+                                   child_left = 1,
+                                   child_right = 2),
+                              Node(index = 1,
+                                   train_df_slice = train_below,
+                                   val_df_slice = validation_below,
+                                   output_value = mean(train_below.iloc[:,-1])),
+                              Node(index = 2,
+                                   train_df_slice = train_above,
+                                   val_df_slice = validation_above,
+                                   output_value = mean(train_above.iloc[:,-1]))
+                              ]
                 
                 self.changed = True
                 
             else:
-                nodes_to_split = [el for el in self.nodes if el.child_left is None and el.n_node_samples >= min_samples_split]
+                nodes_to_split = [el for el in self.nodes 
+                                  if el.feature is None 
+                                  and el.train_df_slice.iloc[:,feature].nunique() >= min_samples_split]
                 
                 for node in nodes_to_split:
+                        
+                    self.changed = True
                     
-                    if min(node.data_slices[0].iloc[:,feature].nunique(),
-                           node.data_slices[1].iloc[:,feature].nunique()) > min_samples_leaf:
-                        
-                        self.changed = True
-                        
-                        node.child_left = len(self.nodes)
-                        split,mse = best_split_col(node.data_slices[0],feature,True)
-                        above,below = split_df(node.data_slices[0],feature,split)
-                        
-                        self.nodes.append(Node(len(self.nodes),
-                                               feat = feature,
-                                               thresh = split,
-                                               n_samples = len(node.data_slices[0]), 
-                                               imp = mse,
-                                               l_r_slice = (below,above),
-                                               out_val = mean(node.data_slices[0].iloc[:,-1])))
-                        
-                        
-                        node.child_right = len(self.nodes)
-                        split,mse = best_split_col(node.data_slices[1],feature,True)
-                        above,below = split_df(node.data_slices[1],feature,split)
-                        
-                        self.nodes.append(Node(len(self.nodes),
-                                               feat = feature,
-                                               thresh = split,
-                                               n_samples = len(node.data_slices[1]), 
-                                               imp = mse,
-                                               l_r_slice = (below,above),
-                                               out_val = mean(node.data_slices[1].iloc[:,-1])))
+                    split,mse = best_split_col(node.train_df_slice,feature,True,min_samples_leaf)
                     
-                        node.data_slices = None
-                        node.output_value = None
+                    node.feature = feature
+                    node.threshold = split
+                    node.impurity = mse
+                    
+                    train_above,train_below = split_df(node.train_df_slice,feature,split)
+                    
+                    validation_above,validation_below = split_df(node.val_df_slice,feature,split)
+                    
+                    node.child_left = len(self.nodes)
+                    self.nodes.append(Node(index = len(self.nodes),
+                                           train_df_slice = train_below,
+                                           val_df_slice = validation_below,
+                                           output_value = mean(train_below.iloc[:,-1])))
+                    
+                    
+                    node.child_right = len(self.nodes)
+                    self.nodes.append(Node(len(self.nodes),
+                                           train_df_slice = train_above,
+                                           val_df_slice = validation_above,
+                                           output_value = mean(train_above.iloc[:,-1])))
+                
+                    node.train_df_slice = None
+                    node.val_df_slice = None
+                    node.output_value = None
                     
     
     def predict(self,X):
