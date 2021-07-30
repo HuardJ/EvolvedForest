@@ -17,15 +17,6 @@ def var(X):
     return output
 
 
-def splits_per_col(dataframe,col_index,min_samples_leaf = 1):
-    
-    column_name = dataframe.columns[col_index]
-    
-    splits = dataframe.sort_values(column_name).reset_index(drop = True).iloc[min_samples_leaf-1:-min_samples_leaf,col_index].drop_duplicates()    
-    
-    return list(splits)
-
-
 def splits_all_cols(dataframe):
     
     splits = dict()
@@ -66,9 +57,11 @@ def feature_combinations(train_data,depth):
 
 
 class Node:
-    def __init__(self,index = None,child_left = None,child_right = None,feature = None,
-                 threshold = None,n_samples = None,impurity = None,train_df_slice = None,
-                 val_df_slice = None,output_value = None,metric = var, evolution = False):
+    def __init__(self,index = None,child_left = None,child_right = None,
+                 feature = None,threshold = None,n_samples = None,
+                 impurity = None,val_impurity = None,train_df_slice = None,
+                 val_df_slice = None,output_value = None, min_samples_leaf = 1,
+                 metric = var,evolution = False):
         
         self.index = index
         self.child_left = child_left
@@ -82,11 +75,25 @@ class Node:
             self.n_samples = n_samples
         
         self.impurity = impurity
+        self.val_impurity = val_impurity
         self.train_df_slice = train_df_slice
         self.val_df_slice = val_df_slice
         self.output_value = output_value
+        self.min_samples_leaf = min_samples_leaf
         self.metric = metric
         self.evolution = evolution
+        
+        
+    def splits_per_col(self,col_index):
+    
+        column_name = self.train_df_slice.columns[col_index]
+        
+        temp = self.train_df_slice.sort_values(column_name)
+        temp.reset_index(drop = True,inplace = True)
+        
+        splits = temp.iloc[self.min_samples_leaf-1:-self.min_samples_leaf,col_index]
+        
+        return list(splits.unique())
 
 
     def split_training(self,col_index,split_val):
@@ -122,14 +129,14 @@ class Node:
         return overall_metric,gr_mean,leq_mean
         
         
-    def best_split_col(self, col_index, min_samples_leaf = 1):
-        potential_splits = splits_per_col(self.train_df_slice,col_index,min_samples_leaf = min_samples_leaf)
+    def best_split_col(self, col_index):
         
         split_winner = None
         mse_winner = None
         gr_node_val = None
         leq_node_val = None
-        for el in potential_splits:
+        
+        for el in self.splits_per_col(col_index):
             above, below = self.split_training(col_index,el)
             
             mse_challenger,gr_mean,leq_mean = self.calculate_overall_metric(above.iloc[:,-1],below.iloc[:,-1],True)
@@ -142,9 +149,19 @@ class Node:
                 leq_node_val = leq_mean
             
         return split_winner,mse_winner,gr_node_val,leq_node_val
+    
+    
+    def remove_weak_nodes(self,candidate):
+        
+        if candidate[-1] > self.val_impurity:
+            output = None
+        else: 
+            output = candidate
+        
+        return output
         
         
-    def all_features_best_splits(self,min_samples_leaf = 1):
+    def all_features_best_splits(self):
     
         splits = []
         errors = []
@@ -156,8 +173,7 @@ class Node:
         
         for col_index in range(self.train_df_slice.shape[1]):
             
-            split, mse, gr_out, leq_out = self.best_split_col(col_index,
-                                                              min_samples_leaf = min_samples_leaf)
+            split, mse, gr_out, leq_out = self.best_split_col(col_index)
             
             splits.append(split)
             errors.append(mse)
@@ -174,13 +190,13 @@ class Node:
                 
         if self.evolution:
             
-            output = sorted(zip(splits,
-                                errors,
-                                gr_node_out,
-                                leq_node_out,
-                                validation_sum_residual_squares),
-                            key = lambda x : x[-1],
-                            reverse = True)
+            output = list(zip(splits,
+                              errors,
+                              gr_node_out,
+                              leq_node_out,
+                              validation_sum_residual_squares))
+            
+            output = [self.remove_weak_nodes(el) for el in output]
             
         else:
             
@@ -194,24 +210,25 @@ class Node:
         
 
 class Tree:
-    def __init__(self,nodes = None,changed = None):
+    def __init__(self,nodes = None,changed = None,min_samples_split = 2,
+                 min_samples_leaf = 1):
+        
         self.nodes = nodes
         self.changed = changed
+        self.min_samples_split = min_samples_split
+        self.min_samples_leaf = min_samples_leaf
         
         
-    def next_gen(self,min_samples_split = 2,min_samples_leaf = 1):
+    def next_gen_seeds(self):
         
         nodes_to_split = [el for el in self.nodes 
                           if el.feature is None
-                          and len(el.train_df_slice) > min_samples_leaf]
-                
+                          and len(el.train_df_slice) > self.min_samples_split]
+        
+        output = []
         for node in nodes_to_split:
             
-            splits,gr_node_out,leq_node_out = node.all_features_best_splits(min_samples_leaf)
-            
-            for i in range(len(splits)):
-                
-                val_above,val_below = split_df(node.val_df_slice,i,splits[i])
+            output.append(node.all_features_best_splits())
     
     
     def grow_specific(self,train_df,validation_df,features,min_samples_split = 2,min_samples_leaf = 1):
