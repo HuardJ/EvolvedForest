@@ -28,62 +28,83 @@ def splits_all_cols(dataframe):
     return splits
 
 
-def enumerate_features(train_data,n_estimators):
-    
-    n_features = train_data.shape[1]
-    #round_one_trees = 0
-    depth = 1
-    while n_features**depth < n_estimators:
-        
-        #round_one_trees = n_features**depth
-        depth += 1
-        
-    return depth
-
-
-def feature_combinations(train_data,depth):
-    
-    original_list = list(range(train_data.shape[1]))
-    original_list = [[el] for el in original_list]
-    
-    feat_list = original_list.copy()
-    
-    iterate = 2
-    while iterate <= depth:
-        feat_list = [el1 + el2 for el2 in original_list for el1 in feat_list]
-        iterate += 1
-        
-    return feat_list
-
-
 class Node:
     def __init__(self,index = None,child_left = None,child_right = None,
                  feature = None,threshold = None,n_samples = None,
                  impurity = None,val_impurity = None,train_df_slice = None,
                  val_df_slice = None,output_value = None, min_samples_leaf = 1,
-                 metric = var,evolution = False):
+                 metric = var,evolution = False,optimal_node = False):
         
+        # Node index number
         self.index = index
-        self.child_left = child_left
-        self.child_right = child_right
-        self.feature = feature
-        self.threshold = threshold
         
+        # Node index to which data less than or equal to the cut 
+        # point was passed
+        self.child_left = child_left 
+        
+        # Node index to which data greater than the cut point was was passed
+        self.child_right = child_right 
+        
+        # Feature index the node splits the data on
+        self.feature = feature 
+        
+        # Feature value used as the point for data
+        self.threshold = threshold 
+        
+        # Determine size of traning set either from argument or inference
         if n_samples is None and train_df_slice is not None:
             self.n_samples = len(train_df_slice)
         else: 
             self.n_samples = n_samples
         
-        self.impurity = impurity
-        self.val_impurity = val_impurity
+        # Training data subset that is passed to this node
         self.train_df_slice = train_df_slice
+        
+        # validation data subset that is passed to this node
         self.val_df_slice = val_df_slice
-        self.output_value = output_value
+        
+        # Determine the predicted value this node would return
+        # this value can either be passed as an argument or calculated
+        # from train_df_slice
+        if output_value is None and train_df_slice is not None:
+            self.output_value = train_df_slice.iloc[:,-1].mean()
+        else:
+            self.output_value = output_value
+        
+        # Determine the error on training data at this node. This 
+        # value can either be passed as an argument or calculated 
+        # from metric and output_value
+        if impurity is None and train_df_slice is not None:
+            self.impurity = metric(train_df_slice.iloc[:,-1],
+                                   self.output_value)
+        else:  
+            self.impurity = impurity
+        
+        # Determine the error on validation data at this node. This 
+        # value can either be passed as an argument or calculated 
+        # from metric and output_value
+        if impurity is None and val_df_slice is not None:
+            self.val_impurity = metric(val_df_slice.iloc[:,-1],
+                                       self.output_value)
+        else:  
+            self.val_impurity = val_impurity
+        
+        # Tuning parameter - potential cut-points will only be
+        # considered if they leave at least min_samples_leaf samples
+        # on either side of the split
         self.min_samples_leaf = min_samples_leaf
+        
+        # Callable function used to determine the error of each node and leaf
         self.metric = metric
+        
+        # Boolean used to implement evolutionary components
         self.evolution = evolution
         
+        # Boolean used by forest class to help select candidate nodes for
+        # splitting
+        self.optimal_node = optimal_node
         
+    
     def splits_per_col(self,col_index):
     
         column_name = self.train_df_slice.columns[col_index]
@@ -91,7 +112,8 @@ class Node:
         temp = self.train_df_slice.sort_values(column_name)
         temp.reset_index(drop = True,inplace = True)
         
-        splits = temp.iloc[self.min_samples_leaf-1:-self.min_samples_leaf,col_index]
+        splits = temp.iloc[self.min_samples_leaf-1:-self.min_samples_leaf
+                           ,col_index]
         
         return list(splits.unique())
 
@@ -115,65 +137,115 @@ class Node:
         
         return gr, leq
 
-
-    def calculate_overall_metric(self,greater,leq):
+    # determine the error of the potential split across both
+    # partitions of the data
+    def overall_error(self,greater,leq):
         N = len(greater) + len(leq)
         
         p_greater = len(greater) / N
         p_leq = len(leq) / N
         
-        overall_metric = p_greater * self.metric(greater) + p_leq * self.metric(leq)
-        gr_mean = mean(greater)
-        leq_mean = mean(leq)
+        overall_error = p_greater * self.metric(greater) + p_leq * self.metric(leq)
             
-        return overall_metric,gr_mean,leq_mean
+        return overall_error
         
-        
-    def best_split_col(self, col_index):
+    
+    # determine best split for a declared column
+    def best_split_col(self, col_index, child_outputs = False, 
+                       split_outputs = False):
         
         split_winner = None
-        mse_winner = None
-        gr_node_val = None
-        leq_node_val = None
+        mse_winner = None # overall error the best split yields
         
+        output = []
         for el in self.splits_per_col(col_index):
             above, below = self.split_training(col_index,el)
             
-            mse_challenger,gr_mean,leq_mean = self.calculate_overall_metric(above.iloc[:,-1],below.iloc[:,-1],True)
+            mse_challenger = self.overall_error(above.iloc[:,-1],below.iloc[:,-1])
                 
             if (split_winner is None) or (mse_challenger < mse_winner):
                 
                 split_winner = el
                 mse_winner = mse_challenger
-                gr_node_val = gr_mean
-                leq_node_val = leq_mean
-            
-        return split_winner,mse_winner,gr_node_val,leq_node_val
-    
-    
-    def remove_weak_nodes(self,candidate):
+                
+                if child_outputs:
+                    gr_node_out = above.iloc[:,-1].mean()
+                    leq_node_out = below.iloc[:,-1].mean()
+                    
+                if split_outputs:
+                    df_above = above
+                    df_below = below
+                
+        output.append(split_winner)
+        output.append(mse_winner)
         
-        if candidate[-1] > self.val_impurity:
-            output = None
-        else: 
-            output = candidate
+        if child_outputs:
+            output.append(gr_node_out)
+            output.append(leq_node_out)
+            
+        if split_outputs:
+            output.append(df_above)
+            output.append(df_below)
+            
+        return tuple(output)
+    
+    
+    # Determine whether a candidate node produces worse validation
+    # error scores than the current node does, this should reduce
+    # overfitting
+    def weak_node(self,candidate_score):
+        
+        return candidate_score > self.val_impurity
+    
+    
+    # Determine what the error for the validation data would be
+    # given a specific column, threshold and node output values for
+    # child nodes
+    def validation_error(self,column_index,threshold,gr_out,
+                         leq_out, return_validation_split = False):
+        
+        above, below = self.split_validation(column_index,
+                                             threshold)
+        
+        #error calculated as sum of residuals squared
+        error_above = sum(above.iloc[:,-1].apply(lambda x : (x - gr_out)**2))
+        error_below = sum(below.iloc[:,-1].apply(lambda x : (x - leq_out)**2))
+        
+        output = error_above + error_below
+        
+        # add validation splits to output if specified
+        if return_validation_split:
+            output = tuple([output] + [above,below])
         
         return output
         
-        
+      
+    # Returns the best split values for each feature based on training
+    # data
     def all_features_best_splits(self):
     
+        column_index = []
         splits = []
         errors = []
-        gr_node_out = []
-        leq_node_out = []
+        gr_node_out = [] # holds output values of child_right nodes
+        leq_node_out = [] # holds output values of child_left nodes
         
+        # if self.evolution is true this function returns the following
+        # additional values: the sum of residual sqares from the 
+        # validation data when the split and child node output values
+        # have been applied to it
         if self.evolution:
             validation_sum_residual_squares = []
         
+        # running through each column:
         for col_index in range(self.train_df_slice.shape[1]):
             
-            split, mse, gr_out, leq_out = self.best_split_col(col_index)
+            column_index.append(col_index)
+            
+            temp = self.best_split_col(col_index,
+                                       child_outputs = self.evolution)
+            
+            split, mse, gr_out, leq_out = temp
             
             splits.append(split)
             errors.append(mse)
@@ -181,124 +253,198 @@ class Node:
             leq_node_out.append(leq_out)
             
             if self.evolution:
-                val_above, val_below = self.split_validation(col_index,split)
                 
-                val_sum_res_sq_above = sum(val_above.iloc[:,-1].apply(lambda x : (x - gr_out)**2))
-                val_sum_res_sq_below = sum(val_below.iloc[:,-1].apply(lambda x : (x - leq_out)**2))
+                sum_res_sq = self.validation_error(col_index,
+                                                   split,
+                                                   gr_out,
+                                                   leq_out)
                 
-                validation_sum_residual_squares.append(val_sum_res_sq_above + val_sum_res_sq_below)
+                validation_sum_residual_squares.append(sum_res_sq)
                 
         if self.evolution:
             
-            output = list(zip(splits,
-                              errors,
-                              gr_node_out,
-                              leq_node_out,
-                              validation_sum_residual_squares))
+            # Collection of all best candidate splits from each
+            # column, with additional calculated features
+            # ordered by their residual squares score on the validation set
+            output = sorted(list(zip(column_index,
+                                     splits,
+                                     errors,
+                                     gr_node_out,
+                                     leq_node_out,
+                                     validation_sum_residual_squares)),
+                            key = lambda x : x[-1])
+                            
+            # Add current node index to each candidate split
+            output = [(self.index) + el for el  in output]
             
-            output = [self.remove_weak_nodes(el) for el in output]
+            # remove nodes that have a worse validation score this current node
+            # this should reduce overfitting
+            output = [el for el in output if not self.weak_node(el[-1])]
             
-        else:
+            # Check to see if this node should be split
+            # if all further splits start overfitting, then the
+            # node is optimal
+            if len(output) == 0:
+                
+                output = None
+                self.optimal_node = True
             
-            output = min(zip(splits,
+        else: # when self.evolution is not true
+            
+            # select best performing candidate split from training errors
+            output = min(zip(column_index,
+                             splits,
                              errors,
                              gr_node_out,
                              leq_node_out),
-                         key = lambda x : x[1])
+                         key = lambda x : x[2])
+            
+            output = (self.index) + output
             
         return output
         
 
 class Tree:
-    def __init__(self,nodes = None,changed = None,min_samples_split = 2,
-                 min_samples_leaf = 1):
+    def __init__(self,train_df_slice,val_df_slice,nodes = None,
+                 changed = None,min_samples_split = 2,
+                 evolution = False,min_samples_leaf = 1):
         
-        self.nodes = nodes
+        # List of nodes in tree, if nodes argument passed is None
+        # then create a list with just the base node
+        if nodes is None:
+            self.nodes = [Node(index = 0,
+                               train_df_slice = train_df_slice.iloc[:,:],
+                               val_df_slice = val_df_slice.iloc[:,:],
+                               min_samples_leaf = min_samples_leaf,
+                               evolution = evolution)]
+        
+        # Boolean to determine whether any nodes have split since
+        # previous generation. If not then the tree is considered
+        # optimal
         self.changed = changed
+        
+        # Tuning parameter - number of samples a node must 
+        # contain in order to consider splitting
         self.min_samples_split = min_samples_split
+        
+        # Tuning parameter - potential cut-points will only be
+        # considered if they leave at least min_samples_leaf samples
+        # on either side of the split
         self.min_samples_leaf = min_samples_leaf
         
+        # Boolean - alters algorithm accordingly
+        self.evolution = evolution
         
+        
+    # Returns list of nodes with only those able to be split
+    def nodes_to_split(self):
+        
+        output = [el for el in self.nodes
+                  if el.feature is None
+                  and len(el.train_df_slice) > self.min_samples_split
+                  and el.optimal_node is False]
+        
+        return output
+        
+    # Evolution method - Returns potential splits from each
+    # node in tree
     def next_gen_seeds(self):
         
-        nodes_to_split = [el for el in self.nodes 
-                          if el.feature is None
-                          and len(el.train_df_slice) > self.min_samples_split]
+        splittable = self.nodes_to_split()
         
         output = []
-        for node in nodes_to_split:
+        for node in splittable:
             
-            output.append(node.all_features_best_splits())
+            temp = node.all_features_best_splits()
+            
+            if temp is not None:
+                
+                output.append(temp)
+                
+        return output
     
     
-    def grow_specific(self,train_df,validation_df,features,min_samples_split = 2,min_samples_leaf = 1):
-        if type(features) is not list:
-            features = [features]
+    # Evolution method - builds the tree according to specified
+    # features
+    def grow_specific(self,node_feature_pairs):
         
+        # ensure node_feature_pairs argument was passed as list type
+        # containing tuples or lists of size 2
+        not_list = type(node_feature_pairs) is not list
+        
+        check_elements = all([type(el) in [list,tuple] for el 
+                              in node_feature_pairs])
+        
+        check_len = all(len(el) == 2 for el in node_feature_pairs)
+        
+        if not_list and not check_elements and not check_len:
+            print('not_list:',not_list)
+            print('check_elements:',check_elements)
+            print('check_len:',check_len)
+            raise ValueError('Invalid node_feature_pairs argument')
+        
+        # Specify that the tree has not changed yet, this will be
+        # updated if candidate splits are deemed good
         self.changed = False
-        for feature in features:
-            #print('Build node for ',feature)
-            if self.nodes is None:
-                
-                split,mse = best_split_col(train_df,feature,True)
-                train_above,train_below = split_df(train_df,feature,split)
-                validation_above,validation_below = split_df(validation_df,feature,split)
-                
-                self.nodes = [Node(index = 0,
-                                   feature = feature,
-                                   threshold = split,
-                                   n_samples = len(train_df),
-                                   impurity = mse,
-                                   output_value = mean(train_df.iloc[:,-1]),
-                                   child_left = 1,
-                                   child_right = 2),
-                              Node(index = 1,
-                                   train_df_slice = train_below,
-                                   val_df_slice = validation_below,
-                                   output_value = mean(train_below.iloc[:,-1])),
-                              Node(index = 2,
-                                   train_df_slice = train_above,
-                                   val_df_slice = validation_above,
-                                   output_value = mean(train_above.iloc[:,-1]))
-                              ]
-                
-                self.changed = True
-                
-            else:
-                nodes_to_split = [el for el in self.nodes 
-                                  if el.feature is None 
-                                  and el.train_df_slice.iloc[:,feature].nunique() >= min_samples_split]
-                
-                for node in nodes_to_split:
-                        
-                    self.changed = True
-                    
-                    split,mse = best_split_col(node.train_df_slice,feature,True,min_samples_leaf)
-                    
-                    node.feature = feature
-                    node.threshold = split
-                    node.impurity = mse
-                    
-                    train_above,train_below = split_df(node.train_df_slice,feature,split)
-                    
-                    validation_above,validation_below = split_df(node.val_df_slice,feature,split)
-                    
-                    node.child_left = len(self.nodes)
-                    self.nodes.append(Node(index = len(self.nodes),
-                                           train_df_slice = train_below,
-                                           val_df_slice = validation_below,
-                                           output_value = mean(train_below.iloc[:,-1])))
-                    
-                    
-                    node.child_right = len(self.nodes)
-                    self.nodes.append(Node(len(self.nodes),
-                                           train_df_slice = train_above,
-                                           val_df_slice = validation_above,
-                                           output_value = mean(train_above.iloc[:,-1])))
-                
-                    node.train_df_slice = None
-                    node.val_df_slice = None
-                    node.output_value = None
+        
+        # cycle through features and splittable nodes
+        for node_feature in node_feature_pairs:
+            
+            # select feature and node
+            node = node_feature[0]
+            feature = node_feature[1]
+            
+            # collect up arguments to be passed to node and 
+            # node's children
+            
+            # find best split for specified feature
+            temp = node.best_split_col(feature,
+                                       child_outputs = True,
+                                       split_outputs = True)
+            
+            # unpack temp
+            split, error, mean_gr, mean_leq, train_gr, train_leq = temp
+            
+            # split validation data according to best split
+            temp = node.validation_error(column_index = feature,
+                                         threshold = split,
+                                         gr_out = mean_gr,
+                                         leq_out = mean_leq,
+                                         return_validation_split = True)
+            
+            validation_error,validation_gr,validation_leq = temp # unpack temp
+            
+            # check split is not weak - if split is weak, then do 
+            # not split node
+            if node.weak_node(validation_error):
+                continue
+            
+            # If the split is not weak then the tree is changing
+            self.changed = True
+            
+            # updated node's attributes and insert child nodes to
+            # nodes list (Tree attribute)
+            
+            node.feature = feature
+            node.threshold = split
+            
+            node.child_left = len(self.nodes)
+            self.nodes.append(Node(index = len(self.nodes),
+                                   train_df_slice = train_leq,
+                                   val_df_slice = validation_leq,
+                                   output_value = mean_leq))
+            
+            node.child_right = len(self.nodes)
+            self.nodes.append(Node(index = len(self.nodes),
+                                   train_df_slice = train_gr,
+                                   val_df_slice = validation_gr,
+                                   output_value = mean_gr))
+            
+            node.train_df_slice = None
+            node.val_df_slice = None
+            node.output_value = None
+            
+        return None
                     
     
     def predict(self,X):
@@ -329,6 +475,35 @@ class EvolvedForest:
         self.trees = []
         # for i in range(n_estimators):
         #     self.trees.append(Tree())
+        
+        
+    # How many node_feature combinations can be initially tried 
+    # given the number of estimators specified? 
+    # The following function helps determine this by calculating
+    # the depth of trees in their first generation
+    def enumerate_features(self,train_data):
+        
+        n_features = train_data.shape[1]
+        depth = 1
+        while (n_features**depth) * (2**(depth - 1)) < n_estimators:
+            depth += 1
+            
+        return depth
+    
+    
+    def feature_combinations(train_data,depth):
+        
+        original_list = list(range(train_data.shape[1]))
+        original_list = [[el] for el in original_list]
+        
+        feat_list = original_list.copy()
+        
+        iterate = 2
+        while iterate <= depth:
+            feat_list = [el1 + el2 for el2 in original_list for el1 in feat_list]
+            iterate += 1
+            
+        return feat_list
     
             
     def train(self,train_X,train_y,val_X,val_y):
