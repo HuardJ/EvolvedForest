@@ -469,12 +469,32 @@ class Tree:
                     
 class EvolvedForest:
     
-    def __init__(self,n_estimators = 100):
+    def __init__(self,n_estimators = 100,initial_depth = 2,
+                 max_depth = None,min_samples_split = 2,
+                 min_samples_leaf = 1):
         
+        # number of trees
         self.n_estimators = n_estimators
+        
+        # Overide how deep the trees must go in their first generation
+        self.initial_depth = initial_depth
+        
+        # Determine depth of trees - if none then keep splitting
+        # until the data in each leaf fully coincides or until
+        # other tuning parameters constrain further splits
+        self.max_depth = max_depth
+        
+        # Tuning parameter - number of samples a node must 
+        # contain in order to consider splitting
+        self.min_samples_split = min_samples_split
+        
+        # Tuning parameter - potential cut-points will only be
+        # considered if they leave at least min_samples_leaf samples
+        # on either side of the split
+        self.min_samples_leaf = min_samples_leaf
+        
+        # Container for trees
         self.trees = []
-        # for i in range(n_estimators):
-        #     self.trees.append(Tree())
         
         
     # How many node_feature combinations can be initially tried 
@@ -484,44 +504,64 @@ class EvolvedForest:
     def enumerate_features(self,train_data):
         
         n_features = train_data.shape[1]
-        depth = 1
-        while (n_features**depth) * (2**(depth - 1)) < n_estimators:
+        depth = 0
+        
+        # Each node has n_feature possibilities. Each depth level 
+        # has 2 times the number of nodes of the previous level
+        while (n_features**(depth + 1)) * (2**(depth)) < self.n_estimators:
             depth += 1
             
         return depth
     
     
-    def feature_combinations(train_data,depth):
+    # returns lists of node_pair combinations to grow the initial
+    # generation of trees to a specified depth
+    def feature_combinations(self,train_data,depth):
         
+        # determine the number of nodes - note sum of geometric
+        # sequence of common ratio 2
+        n_nodes = 2**(depth + 1) - 1
+        
+        # feature index list
         original_list = list(range(train_data.shape[1]))
-        original_list = [[el] for el in original_list]
         
-        feat_list = original_list.copy()
+        # feature combinations for root node
+        feat_list = [[(0,el)] for el in original_list]
         
-        iterate = 2
-        while iterate <= depth:
-            feat_list = [el1 + el2 for el2 in original_list for el1 in feat_list]
-            iterate += 1
+        # assign feature pairs for each node and node combination
+        current_node = 1
+        while current_node < n_nodes:
+            
+            feat_list = [el1 + [(current_node,el2)] for el2 in original_list for el1 in feat_list]
+            current_node += 1
             
         return feat_list
     
             
     def train(self,train_X,train_y,val_X,val_y):
         
+        # feature space dimensions
         training_features_n = train_X.shape[1]
-        #print('Number of training features: ',training_features_n)
         
-        survival_number = int(self.n_estimators/training_features_n)
-        #print('Number of trees to survive: ', survival_number)
         
         ### PHASE 1: Build initial set of trees
-        depth = enumerate_features(train_X,self.n_estimators)
+        
+        # Calculate inititial trees' depth
+        depth = self.enumerate_features(train_X)
         #print('Phase 1 tree depth: ', depth)
         
-        features = feature_combinations(train_X, depth)
+        # determine whether calculated initial tree depth is too
+        # small and should be overriden by pre-set tree depth
+        if depth < self.initial_depth:
+            depth = self.initial_depth # overide
         
+        # Generate feature sets
+        features = self.feature_combinations(train_X, depth)
+        
+        # combine training data into a whole entity
         train_X['y'] = train_y
         
+        # Create and Grow Tree for each feature set
         for feat in features:
             #print('Creating tree for ',feat,' features')
             self.trees.append(Tree())
