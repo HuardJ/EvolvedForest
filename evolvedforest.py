@@ -83,7 +83,8 @@ class Node:
         # Determine the error on validation data at this node. This 
         # value can either be passed as an argument or calculated 
         # from metric and output_value
-        if impurity is None and val_df_slice is not None:
+        if val_impurity is None and val_df_slice is not None:
+            
             self.val_impurity = metric(val_df_slice.iloc[:,-1],
                                        self.output_value)
         else:  
@@ -317,6 +318,10 @@ class Tree:
                                val_df_slice = val_df_slice.iloc[:,:],
                                min_samples_leaf = min_samples_leaf,
                                evolution = evolution)]
+            
+        #Store original size of train_df_slice and val_df_slice
+        self.train_N = len(train_df_slice)
+        self.val_N  = len(val_df_slice)
         
         # Boolean to determine whether any nodes have split since
         # previous generation. If not then the tree is considered
@@ -364,8 +369,26 @@ class Tree:
         return output
     
     
+    # Return node by nodes index attribute
+    def get_node(self, idx, from_splittable = False):
+        
+        output = None
+        
+        if from_splittable:
+            node_list = self.nodes_to_split()
+        else:
+            node_list = self.nodes
+        
+        for node in node_list:
+            if node.index == idx:
+                output = node
+                break
+            
+        return output
+    
+    
     # Evolution method - builds the tree according to specified
-    # features
+    # node and feature to split on
     def grow_specific(self,node_feature_pairs):
         
         # ensure node_feature_pairs argument was passed as list type
@@ -391,8 +414,13 @@ class Tree:
         for node_feature in node_feature_pairs:
             
             # select feature and node
-            node = node_feature[0]
+            node = self.get_node(node_feature[0],True)
             feature = node_feature[1]
+            
+            # Check node exists i.e. was a splittable node. Otherwise, skip
+            # to next node_feature
+            if node is None:
+                continue
             
             # collect up arguments to be passed to node and 
             # node's children
@@ -445,7 +473,21 @@ class Tree:
             node.output_value = None
             
         return None
-                    
+    
+    
+    def validation_score(self):
+        
+        ### Validation_score currently only returns 
+        
+        # Find leaf nodes
+        leaf_nodes = [node for node in self.nodes if node.feature is None]
+        
+        # find the sum of squared residuals from each node
+        output = sum([len(node.val_df_slice) * node.val_impurity for node in leaf_nodes])
+        output = output/self.val_N
+        
+        return output
+        
     
     def predict(self,X):
         
@@ -540,8 +582,11 @@ class EvolvedForest:
             
     def train(self,train_X,train_y,val_X,val_y):
         
-        # feature space dimensions
-        training_features_n = train_X.shape[1]
+        # feature space dimensions and total training data size
+        training_N, training_features_n = train_X.shape
+        
+        # validation data size
+        validation_N = len(val_X)
         
         
         ### PHASE 1: Build initial set of trees
@@ -561,13 +606,24 @@ class EvolvedForest:
         # combine training data into a whole entity
         train_X['y'] = train_y
         
+        # combine validation data into a whole entity
+        val_X['y'] = val_y
+        
         # Create and Grow Tree for each feature set
         for feat in features:
             #print('Creating tree for ',feat,' features')
-            self.trees.append(Tree())
-            self.trees[-1].grow_specific(train_X, feat)
+            self.trees.append(Tree(train_X.iloc[:,:],
+                                   val_X.iloc[:,:],
+                                   min_samples_split = self.min_samples_split,
+                                   min_samples_leaf = self.min_samples_leaf,
+                                   evolution = True))
             
+            self.trees[-1].grow_specific(feat)
             
+        
+        # Since initial feature set is larger than n_estimators, select the top
+        # 'n_estimators' performing trees based on validation_score
+        self.trees = sorted(self.trees,key = lambda x : x.validation_score())[:self.n_estimators]
         
         ### PHASE 2: Build while loop to keep splitting trees until none can be split anymore
         while any([tree.changed for tree in self.trees]):
