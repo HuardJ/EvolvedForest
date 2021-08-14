@@ -5,14 +5,13 @@ Created on Mon Apr 26 16:42:19 2021
 @author: Student User
 """
 import pandas as pd
-from statistics import variance,mean
+from statistics import pvariance,mean
 from sklearn.metrics import mean_squared_error
+from heapq import merge as heap_merge
 
 def var(X):
-    if len(X) > 1:
-        output = variance(X)
-    else:
-        output = 0
+    
+    output = pvariance(X)
         
     return output
 
@@ -26,6 +25,9 @@ def splits_all_cols(dataframe):
         splits[i] = list(dataframe.iloc[:,i].drop_duplicates())
         
     return splits
+
+
+### 
 
 
 class Node:
@@ -231,56 +233,62 @@ class Node:
         gr_node_out = [] # holds output values of child_right nodes
         leq_node_out = [] # holds output values of child_left nodes
         
-        # if self.evolution is true this function returns the following
-        # additional values: the sum of residual sqares from the 
-        # validation data when the split and child node output values
-        # have been applied to it
+        # if self.evolution is true this function also returns the sum of 
+        # residual sqares from the validation data, after the split and child 
+        # node output values have been applied to it
         if self.evolution:
             validation_sum_residual_squares = []
         
         # running through each column:
         for col_index in range(self.train_df_slice.shape[1]):
             
-            column_index.append(col_index)
-            
+            # get best split details for this specific column
             temp = self.best_split_col(col_index,
                                        child_outputs = self.evolution)
             
-            split, mse, gr_out, leq_out = temp
-            
-            splits.append(split)
-            errors.append(mse)
-            gr_node_out.append(gr_out)
-            leq_node_out.append(leq_out)
+            split, mse, gr_out, leq_out = temp # unpack
             
             if self.evolution:
                 
                 sum_res_sq = self.validation_error(col_index,
-                                                   split,
-                                                   gr_out,
-                                                   leq_out)
+                                                    split,
+                                                    gr_out,
+                                                    leq_out)
                 
+                # check whether this candidate split is a weak split - 
+                # if so, do not add it's details to the lists and skip to the
+                # next candidate column
+                if self.weak_node(sum_res_sq/len(self.val_df_slice)):
+                    continue
+                
+                # add residual squares score
                 validation_sum_residual_squares.append(sum_res_sq)
+            
+            # add split details
+            column_index.append(col_index)
+            splits.append(split)
+            errors.append(mse)
+            gr_node_out.append(gr_out)
+            leq_node_out.append(leq_out)
                 
+            
+        ## Wrapping up outputs
+        
         if self.evolution:
             
-            # Collection of all best candidate splits from each
-            # column, with additional calculated features
-            # ordered by their residual squares score on the validation set
-            output = sorted(list(zip(column_index,
-                                     splits,
-                                     errors,
-                                     gr_node_out,
-                                     leq_node_out,
-                                     validation_sum_residual_squares)),
+            # Collection of all best candidate splits from each column, with 
+            # additional calculated features ordered by their residual 
+            # squares score on the validation set
+            output = sorted(zip(column_index,
+                                splits,
+                                errors,
+                                gr_node_out,
+                                leq_node_out,
+                                validation_sum_residual_squares),
                             key = lambda x : x[-1])
                             
             # Add current node index to each candidate split
             output = [(self.index) + el for el  in output]
-            
-            # remove nodes that have a worse validation score this current node
-            # this should reduce overfitting
-            output = [el for el in output if not self.weak_node(el[-1])]
             
             # Check to see if this node should be split
             # if all further splits start overfitting, then the
@@ -357,14 +365,69 @@ class Tree:
         
         splittable = self.nodes_to_split()
         
-        output = []
+        # place holder for best performing seed
+        base_seed = []
+        
+        all_node_features = []
         for node in splittable:
             
             temp = node.all_features_best_splits()
             
             if temp is not None:
                 
-                output.append(temp)
+                # add best performing split to base_seed and remove from temp
+                base_seed.append(temp.pop(0))
+                
+                # add alternative splits to all_node_features - ordered by
+                # validation scores
+                all_node_features = heap_merge(all_node_features,temp,
+                                               key = lambda x : x[-1])
+        
+        # output is an ordered list of best performing seeds
+        output = [base_seed]
+        
+        # condensed list from all_node_features of node-feature split index 
+        # and the difference in validation scores this node-feature split and 
+        # this nodes best split, which is found in best_seed.
+        idx_val = [((i),all_node_features[i][-1] - j)
+                   for i in range(len(all_node_features)) 
+                   for j in [el[-1] for el in base_seed 
+                             if el[0] == all_node_features[i][0]]]
+        
+        # order index_val by the amount of additional validation error from 
+        # base seed each node-feature split results in
+        idx_val = sorted(idx_val,key = lambda x : x[-1])
+        
+        # only need at most n_estimators worth of seeds and we already have 
+        # base_seed
+        if len(idx_val) > self.n_estimators - 1:
+            idx_val = idx_val[:self.n_estimators]
+            
+        # add seeds in order of best performing overall node-feature 
+        # combinations
+        i = 0 # number of elements in idx_val already considered 
+        while len(output) < self.n_estimators:
+            
+            # build next_seed off of base seed, replacing node-feature splits
+            # in base seeds with next best splits determined by idx_val
+            next_seed = base_seed
+            
+            # cycle through node indexes stored in idx_val at point i and 
+            # retreive corresponding node feature splits from all_node_features
+            for idx in idx_val[i]:
+                
+                replacement_node = all_node_features[idx]
+                
+                # find corresponding node in next_seed
+                for j in range(len(next_seed)):
+                    if next_seed[j][0] == replacement_node[0]:
+                        
+            
+            # increment i
+            i += 1
+            
+            while self.n_estimators - len(output) < len(idx_val) - i
+            
                 
         return output
     
@@ -388,7 +451,7 @@ class Tree:
     
     
     # Evolution method - builds the tree according to specified
-    # node and feature to split on
+    # node and feature to split on.
     def grow_specific(self,node_feature_pairs):
         
         # ensure node_feature_pairs argument was passed as list type
@@ -588,7 +651,6 @@ class EvolvedForest:
         # validation data size
         validation_N = len(val_X)
         
-        
         ### PHASE 1: Build initial set of trees
         
         # Calculate inititial trees' depth
@@ -621,11 +683,13 @@ class EvolvedForest:
             self.trees[-1].grow_specific(feat)
             
         
-        # Since initial feature set is larger than n_estimators, select the top
-        # 'n_estimators' performing trees based on validation_score
-        self.trees = sorted(self.trees,key = lambda x : x.validation_score())[:self.n_estimators]
+        # Since initial feature set is larger than n_estimators, select the 
+        # top 'n_estimators' performing trees based on validation_score
+        self.trees = sorted(self.trees,key = lambda x : x.validation_score())
+        self.trees = self.trees[:self.n_estimators]
         
-        ### PHASE 2: Build while loop to keep splitting trees until none can be split anymore
+        ### PHASE 2: Build while loop to keep splitting trees until none can 
+        ### be split anymore
         while any([tree.changed for tree in self.trees]):
             
             ### PHASE 3: Evaluate forest against cross-validation
