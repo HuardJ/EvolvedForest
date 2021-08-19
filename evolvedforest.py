@@ -8,6 +8,7 @@ import pandas as pd
 from statistics import pvariance,mean
 from sklearn.metrics import mean_squared_error
 from heapq import merge as heap_merge
+import copy
 
 def var(X):
     
@@ -294,7 +295,6 @@ class Node:
             # if all further splits start overfitting, then the
             # node is optimal
             if len(output) == 0:
-                
                 output = None
                 self.optimal_node = True
             
@@ -359,9 +359,11 @@ class Tree:
         
         return output
         
-    # Evolution method - Returns potential splits from each
-    # node in tree
-    def next_gen_seeds(self):
+    # Evolution method - Returns potential node-split combinations from each
+    # node in tree ordered by validation score
+    def next_gen_seeds(self,n_estimators):
+        
+        current_val_score = self.validation_score(False)
         
         splittable = self.nodes_to_split()
         
@@ -369,10 +371,13 @@ class Tree:
         base_seed = []
         
         all_node_features = []
+        
+        # run through each splittable node
         for node in splittable:
             
             temp = node.all_features_best_splits()
             
+            # check node is not optimal
             if temp is not None:
                 
                 # add best performing split to base_seed and remove from temp
@@ -383,8 +388,24 @@ class Tree:
                 all_node_features = heap_merge(all_node_features,temp,
                                                key = lambda x : x[-1])
         
-        # output is an ordered list of best performing seeds
-        output = [base_seed]
+        # if all nodes are optimal, then set changed to false and return None
+        if len(base_seed) == 0:
+            self.changed = False
+            return None
+        
+        ### output is an ordered list of best performing seeds and the tree
+        ### validation score if seed is grown
+        
+        # list of differences in validation score between current and new node 
+        # splits
+        new_val_score = [em.val_impurity * len(em.val_df_slice) - el[-1] 
+                         for el in base_seed for em in self.nodes
+                         if el[0] == em.index]
+        
+        # current validation score minus sum of differences
+        new_val_score = current_val_score - sum(new_val_score)
+        
+        output = [(base_seed,new_val_score)]
         
         # condensed list from all_node_features of node-feature split index 
         # and the difference in validation scores this node-feature split and 
@@ -400,35 +421,72 @@ class Tree:
         
         # only need at most n_estimators worth of seeds and we already have 
         # base_seed
-        if len(idx_val) > self.n_estimators - 1:
-            idx_val = idx_val[:self.n_estimators]
+        if len(idx_val) > n_estimators - 1:
+            idx_val = idx_val[:n_estimators]
             
         # add seeds in order of best performing overall node-feature 
         # combinations
         i = 0 # number of elements in idx_val already considered 
-        while len(output) < self.n_estimators:
+        while len(output) < n_estimators:
             
             # build next_seed off of base seed, replacing node-feature splits
             # in base seeds with next best splits determined by idx_val
             next_seed = base_seed
             
-            # cycle through node indexes stored in idx_val at point i and 
-            # retreive corresponding node feature splits from all_node_features
-            for idx in idx_val[i]:
+            # cycle through all_node_features indexes stored in idx_val at 
+            # point i and retreive corresponding node feature splits from 
+            # all_node_features
+            for idx in idx_val[i][0]:
                 
                 replacement_node = all_node_features[idx]
                 
-                # find corresponding node in next_seed
-                for j in range(len(next_seed)):
+                # find and replace corresponding node in next_seed
+                j = 0
+                while j < len(next_seed):
                     if next_seed[j][0] == replacement_node[0]:
+                        next_seed[j] = replacement_node
+                        j = len(next_seed) # stop looping
+                    else:
+                        j += 1 # increment
                         
+            # list of differences in validation score between current and new
+            # node splits
+            new_val_score = [em.val_impurity * len(em.val_df_slice) - el[-1] 
+                             for el in next_seed for em in self.nodes
+                             if el[0] == em.index]
+            
+            # current validation score minus sum of differences
+            new_val_score = current_val_score - sum(new_val_score)
+                        
+            # insert next_seed into output
+            output.append((next_seed,new_val_score))
+                        
+            # update idx_val with combinations of previous features
+            new_idx_vals = []
+            j = i - 1 # previous idx_val considered
+            while j >= 0:
+                # check no overlap between index components
+                if len(set(idx_val[i][0]) & set(idx_val[j][0])) == 0:
+                    new_combination = (idx_val[i][0] + idx_val[j][0],
+                                       idx_val[i][1] + idx_val[j][1])
+                    
+                    new_idx_vals.append(new_combination)
+                    
+                j -= 1 # increment
+                    
+            # sort new_idx_vals and add to idx_val
+            idx_val = heap_merge(idx_val,
+                                 sorted(new_idx_vals,key = lambda x : x [-1]),
+                                 key = lambda x : x[-1])
+            
+            # condense idx_val
+            if len(idx_val) > self.n_estimators:
+                idx_val = idx_val[:self.n_estimators]
             
             # increment i
             i += 1
+            # end of while loop
             
-            while self.n_estimators - len(output) < len(idx_val) - i
-            
-                
         return output
     
     
@@ -538,16 +596,64 @@ class Tree:
         return None
     
     
-    def validation_score(self):
+    def grow_seed(self,seed):
         
-        ### Validation_score currently only returns 
+        for node_split_features in seed:
+            
+            node_to_split = self.get_node(node_split_features[0])
+            
+            node_to_split.feature = node_split_features[1]
+            node_to_split.threshold = node_split_features[2]
+            
+            # split training dataframe slice
+            temp = node_to_split.split_training(node_split_features[1],
+                                                node_split_features[2])
+            
+            train_gr,train_leq = temp
+            
+            # split validation dataframe slice
+            temp = node_to_split.split_validation(node_split_features[1],
+                                                  node_split_features[2])
+            
+            validation_gr,validation_leq = temp
+            
+            # empty slice's and ouput value
+            node_to_split.train_df_slice = None
+            node_to_split.val_df_slice = None
+            node_to_split.output_value = None
+            
+            # Add new nodes
+            node_to_split.child_left = len(self.nodes)
+            self.nodes.append(Node(index = len(self.nodes),
+                                   train_df_slice = train_leq,
+                                   val_df_slice = validation_leq,
+                                   output_value = node_split_features[4]))
+            
+            node_to_split.child_right = len(self.nodes)
+            self.nodes.append(Node(index = len(self.nodes),
+                                   train_df_slice = train_gr,
+                                   val_df_slice = validation_gr,
+                                   output_value = node_split_features[5]))
+            
+            
+        
+        return None
+    
+    
+    def validation_score(self,scaled = True):
+        
+        ### Validation_score currently only returns sum of squared errors or
+        ### mean squared error
         
         # Find leaf nodes
         leaf_nodes = [node for node in self.nodes if node.feature is None]
         
         # find the sum of squared residuals from each node
         output = sum([len(node.val_df_slice) * node.val_impurity for node in leaf_nodes])
-        output = output/self.val_N
+        
+        # mean square error
+        if scaled:
+            output = output/self.val_N
         
         return output
         
@@ -599,7 +705,7 @@ class EvolvedForest:
         self.min_samples_leaf = min_samples_leaf
         
         # Container for trees
-        self.trees = []
+        self.forest = []
         
         
     # How many node_feature combinations can be initially tried 
@@ -674,58 +780,99 @@ class EvolvedForest:
         # Create and Grow Tree for each feature set
         for feat in features:
             #print('Creating tree for ',feat,' features')
-            self.trees.append(Tree(train_X.iloc[:,:],
+            self.forest.append(Tree(train_X.iloc[:,:],
                                    val_X.iloc[:,:],
                                    min_samples_split = self.min_samples_split,
                                    min_samples_leaf = self.min_samples_leaf,
                                    evolution = True))
             
-            self.trees[-1].grow_specific(feat)
+            self.forest[-1].grow_specific(feat)
             
         
         # Since initial feature set is larger than n_estimators, select the 
         # top 'n_estimators' performing trees based on validation_score
-        self.trees = sorted(self.trees,key = lambda x : x.validation_score())
-        self.trees = self.trees[:self.n_estimators]
+        self.forest = sorted(self.forest,key = lambda x : x.validation_score())
+        self.forest = self.forest[:self.n_estimators]
         
         ### PHASE 2: Build while loop to keep splitting trees until none can 
         ### be split anymore
-        while any([tree.changed for tree in self.trees]):
+        while any([tree.changed for tree in self.forest]):
             
-            ### PHASE 3: Evaluate forest against cross-validation
-            score = dict()
-            for i in range(len(self.trees)):
+            ### PHASE 3: Generate next set of viable splits for each tree and
+            ### select best performing splits
+            
+            seed_bag = [] # holds seeds from any tree
+            for i in range(len(self.forest)):
                 
-                predicted_validation = self.trees[i].predict(val_X)
-                validation_score = mean_squared_error(val_y,predicted_validation)
+                # generate seeds from trees not known to be unchangeable
+                if self.forest[i].changed:
+                    seeds = self.forest[i].next_gen_seeds()
+                    
+                    # if seeds is not None then add seeds to seed_bag
+                    if seeds is not None:
+                        
+                        # make note of parent tree
+                        seeds = [(i) + el for el in seeds]
+                        
+                        seed_bag = heap_merge(seed_bag,seeds,
+                                              key = lambda x : x[-1])
+                        
+                        # seed_bag should only hold at most n_estimators
+                        if len(seed_bag) > self.n_estimators:
+                            seed_bag = seed_bag[:self.n_estimators]
+                            
+            ### PHASE 4: compare best performing splits with currently optimal
+            ### trees
+            
+            # get seedless trees validation scores
+            seedless_trees = [i for i in range(len(self.forest)) 
+                              if self.forest[i].changed == False]
+            
+            seedless_trees = [(el,self.forest[el].validation_score(False))
+                              for el in seedless_trees]
+            
+            # determine successor trees and seeds
+            successors = heap_merge(seedless_trees,
+                                    seed_bag,
+                                    key = lambda x : x[-1])
+            successors = successors[:self.n_estimators]
+            
+            ### PHASE 5: Grow seeds and create new forest
+            
+            new_forest = []
+            
+            # loop through successors to select trees from index values
+            for successor in successors:
                 
-                score[i] = validation_score
+                # check whether successor is optimal tree or seed
+                if len(successor) == 3: # seed
                 
-            score = sorted(score.items(),key = lambda x : x[1])
+                    # if seed then make a copy of associated tree and split 
+                    # nodes in seed
+                    new_tree = copy.copy(self.forest[successor[0]])
+                    new_tree.grow_seed(successor[1])
+                    
+                    # add tree to new_forest
+                    new_forest.append(new_tree)
+                else:
+                    # otherwise add optimal tree to new forest
+                    new_forest.append(self.forest[successor[0]])
+                    
+            self.forest = new_forest
+                    
+        return None
+                    
             
             
-            # PHASE 4: Select best performing trees to survive and replace old forest
-            surviving_trees_idx = [el[0] for el in score[:survival_number + 1]]
-            
-            next_gen_trees = []
-            for el in surviving_trees_idx:
-                
-                next_gen_trees += [self.trees[el]]*training_features_n
-                
-            self.trees = next_gen_trees
-            
-            # Phase 5: Add new split to each tree
-            for i in range(len(self.trees)):
-                self.trees[i].grow_specific(train_X, i%training_features_n)
         
         
     def predict(self,X):
             
         predicted_values = 0
-        for tree in self.trees:
+        for tree in self.forest:
             temp = tree.predict(X)
             predicted_values += temp
             
-        predicted_values = predicted_values/len(self.trees)
+        predicted_values = predicted_values/len(self.forest)
         
         return predicted_values
