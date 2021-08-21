@@ -116,10 +116,12 @@ class Node:
         temp = self.train_df_slice.sort_values(column_name)
         temp.reset_index(drop = True,inplace = True)
         
-        splits = temp.iloc[self.min_samples_leaf-1:-self.min_samples_leaf
+        output = temp.iloc[self.min_samples_leaf-1:-self.min_samples_leaf
                            ,col_index]
         
-        return list(splits.unique())
+        output = pd.Series(output.unique())
+        
+        return output
 
 
     def split_training(self,col_index,split_val):
@@ -163,8 +165,19 @@ class Node:
         
         output = []
         for el in self.splits_per_col(col_index):
-            above, below = self.split_training(col_index,el)
             
+            # skip this split in evolution mode if the validation dataframe
+            # has no elements in one side of the parition
+            if self.evolution:
+                
+                val_above,val_below = self.split_validation(col_index, el)
+                
+                if len(val_above) == 0 or len(val_below) == 0:
+                    
+                    continue
+            
+            above, below = self.split_training(col_index,el)
+                
             mse_challenger = self.overall_error(above.iloc[:,-1],below.iloc[:,-1])
                 
             if (split_winner is None) or (mse_challenger < mse_winner):
@@ -581,13 +594,15 @@ class Tree:
             self.nodes.append(Node(index = len(self.nodes),
                                    train_df_slice = train_leq,
                                    val_df_slice = validation_leq,
-                                   output_value = mean_leq))
+                                   output_value = mean_leq,
+                                   evolution = True))
             
             node.child_right = len(self.nodes)
             self.nodes.append(Node(index = len(self.nodes),
                                    train_df_slice = train_gr,
                                    val_df_slice = validation_gr,
-                                   output_value = mean_gr))
+                                   output_value = mean_gr,
+                                   evolution = True))
             
             node.train_df_slice = None
             node.val_df_slice = None
@@ -627,13 +642,15 @@ class Tree:
             self.nodes.append(Node(index = len(self.nodes),
                                    train_df_slice = train_leq,
                                    val_df_slice = validation_leq,
-                                   output_value = node_split_features[4]))
+                                   output_value = node_split_features[4],
+                                   evolution = True))
             
             node_to_split.child_right = len(self.nodes)
             self.nodes.append(Node(index = len(self.nodes),
                                    train_df_slice = train_gr,
                                    val_df_slice = validation_gr,
-                                   output_value = node_split_features[5]))
+                                   output_value = node_split_features[5],
+                                   evolution = True))
             
             
         
@@ -754,9 +771,6 @@ class EvolvedForest:
         # feature space dimensions and total training data size
         training_N, training_features_n = train_X.shape
         
-        # validation data size
-        validation_N = len(val_X)
-        
         ### PHASE 1: Build initial set of trees
         
         # Calculate inititial trees' depth
@@ -861,9 +875,6 @@ class EvolvedForest:
             self.forest = new_forest
                     
         return None
-                    
-            
-            
         
         
     def predict(self,X):
