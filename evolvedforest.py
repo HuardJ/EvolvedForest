@@ -6,13 +6,13 @@ Created on Mon Apr 26 16:42:19 2021
 """
 import pandas as pd
 from statistics import pvariance,mean
-from sklearn.metrics import mean_squared_error
+from sklearn.metrics import mean_squared_error,r2_score
 from heapq import merge as heap_merge
 import copy
 
-def var(X):
+def var(X,avg = None):
     
-    output = pvariance(X)
+    output = pvariance(X,avg)
         
     return output
 
@@ -111,15 +111,11 @@ class Node:
     
     def splits_per_col(self,col_index):
     
-        column_name = self.train_df_slice.columns[col_index]
+        values = set(self.train_df_slice.iloc[:,col_index])
         
-        temp = self.train_df_slice.sort_values(column_name)
-        temp.reset_index(drop = True,inplace = True)
+        values = sorted(values)[self.min_samples_leaf-1:-self.min_samples_leaf]
         
-        output = temp.iloc[self.min_samples_leaf-1:-self.min_samples_leaf
-                           ,col_index]
-        
-        output = pd.Series(output.unique())
+        output = pd.Series(values)
         
         return output
 
@@ -138,8 +134,8 @@ class Node:
         
         col_name = self.val_df_slice.columns[col_index]
         
-        leq = self.train_df_slice.loc[self.val_df_slice[col_name] <= split_val,:]
-        gr = self.train_df_slice.loc[self.val_df_slice[col_name] > split_val,:]
+        leq = self.val_df_slice.loc[self.val_df_slice[col_name] <= split_val,:]
+        gr = self.val_df_slice.loc[self.val_df_slice[col_name] > split_val,:]
         
         return gr, leq
 
@@ -161,10 +157,12 @@ class Node:
                        split_outputs = False):
         
         split_winner = None
-        mse_winner = None # overall error the best split yields
+        mse_winner = copy.copy(self.impurity) # overall error the best split yields
         
         output = []
-        for el in self.splits_per_col(col_index):
+        
+        splits = self.splits_per_col(col_index)
+        for el in splits:
             
             # skip this split in evolution mode if the validation dataframe
             # has no elements in one side of the parition
@@ -192,6 +190,9 @@ class Node:
                 if split_outputs:
                     df_above = above
                     df_below = below
+                    
+        if split_winner is None:
+            return None
                 
         output.append(split_winner)
         output.append(mse_winner)
@@ -259,6 +260,10 @@ class Node:
             # get best split details for this specific column
             temp = self.best_split_col(col_index,
                                        child_outputs = self.evolution)
+            
+            # check there is a best split for this column
+            if temp is None:
+                continue # if not then move on to next column
             
             split, mse, gr_out, leq_out = temp # unpack
             
@@ -578,7 +583,7 @@ class Tree:
             
             # check split is not weak - if split is weak, then do 
             # not split node
-            if node.weak_node(validation_error):
+            if node.weak_node(validation_error/len(node.val_df_slice)):
                 continue
             
             # If the split is not weak then the tree is changing
@@ -624,13 +629,13 @@ class Tree:
             temp = node_to_split.split_training(node_split_features[1],
                                                 node_split_features[2])
             
-            train_gr,train_leq = temp
+            train_gr,train_leq = temp # Unpack
             
             # split validation dataframe slice
             temp = node_to_split.split_validation(node_split_features[1],
                                                   node_split_features[2])
             
-            validation_gr,validation_leq = temp
+            validation_gr,validation_leq = temp # Unpack
             
             # empty slice's and ouput value
             node_to_split.train_df_slice = None
@@ -652,7 +657,7 @@ class Tree:
                                    output_value = node_split_features[5],
                                    evolution = True))
             
-            
+            self.changed = True
         
         return None
     
@@ -673,6 +678,14 @@ class Tree:
             output = output/self.val_N
         
         return output
+    
+    
+    def copy(self):
+        
+        new_tree = copy.copy(self)
+        new_tree.nodes = [copy.copy(el) for el in new_tree.nodes]
+        
+        return new_tree
         
     
     def predict(self,X):
@@ -721,7 +734,7 @@ class EvolvedForest:
         # on either side of the split
         self.min_samples_leaf = min_samples_leaf
         
-        # Container for trees
+        # Container for trees - initialize with a single tree
         self.forest = []
         
         
@@ -742,48 +755,48 @@ class EvolvedForest:
         return depth
     
     
-    # returns lists of node_pair combinations to grow the initial
-    # generation of trees to a specified depth
-    def feature_combinations(self,train_data,depth):
+    # returns lists of node_pair combinations to grow
+    def feature_combinations(self,n_features,depth):
         
-        # determine the number of nodes - note sum of geometric
-        # sequence of common ratio 2
-        n_nodes = 2**(depth + 1) - 1
+        # determine the node indices
+        nodes = range(2**depth - 1, 2**(depth + 1) - 1)
         
         # feature index list
-        original_list = list(range(train_data.shape[1]))
+        features = range(n_features)
         
-        # feature combinations for root node
-        feat_list = [[(0,el)] for el in original_list]
+        # feature combinations for first node in nodes
+        node_features = [[(nodes[0],el)] for el in features]
         
         # assign feature pairs for each node and node combination
         current_node = 1
-        while current_node < n_nodes:
+        while current_node < len(nodes):
             
-            feat_list = [el1 + [(current_node,el2)] for el2 in original_list for el1 in feat_list]
+            node_features = [el1 + [(nodes[current_node],el2)] 
+                             for el2 in features for el1 in node_features]
             current_node += 1
             
-        return feat_list
+        return node_features
     
             
-    def train(self,train_X,train_y,val_X,val_y):
+    def train(self,train_X,train_y,val_X,val_y,verbose = False):
         
         # feature space dimensions and total training data size
         training_N, training_features_n = train_X.shape
         
         ### PHASE 1: Build initial set of trees
-        
+        if verbose:
+            print('Phase 1 started')
+            
         # Calculate inititial trees' depth
         depth = self.enumerate_features(train_X)
-        #print('Phase 1 tree depth: ', depth)
         
         # determine whether calculated initial tree depth is too
         # small and should be overriden by pre-set tree depth
         if depth < self.initial_depth:
             depth = self.initial_depth # overide
-        
-        # Generate feature sets
-        features = self.feature_combinations(train_X, depth)
+            
+        if verbose:
+            print('\tPhase 1 tree depth: ', depth)
         
         # combine training data into a whole entity
         train_X['y'] = train_y
@@ -791,16 +804,45 @@ class EvolvedForest:
         # combine validation data into a whole entity
         val_X['y'] = val_y
         
-        # Create and Grow Tree for each feature set
-        for feat in features:
-            #print('Creating tree for ',feat,' features')
-            self.forest.append(Tree(train_X.iloc[:,:],
-                                   val_X.iloc[:,:],
-                                   min_samples_split = self.min_samples_split,
-                                   min_samples_leaf = self.min_samples_leaf,
-                                   evolution = True))
+        if verbose:
+            print('Growing first generation trees...')
             
-            self.forest[-1].grow_specific(feat)
+        # Create a single tree as template
+        self.forest.append(Tree(train_X.iloc[:,:],
+                                val_X.iloc[:,:],
+                                min_samples_split = self.min_samples_split,
+                                min_samples_leaf = self.min_samples_leaf,
+                                evolution = True))
+        
+        # Create and Grow Tree for each feature set
+        for level in range(depth + 1):
+            
+            if verbose:
+                print('\tCreating ',str(level),' depth features')
+                
+            new_forest = []
+            
+            # get node-feature pairs for this depth level
+            node_features = self.feature_combinations(training_features_n
+                                                      ,level)
+            
+            # Cycle through currently existing forest
+            for tree in self.forest:
+                
+                # Cycle throught node-feature permutations
+                for n_f in node_features:
+                    
+                    # take deep copy of tree to leave the original unaltered and
+                    # able to be further referenced
+                    temp_tree = tree.copy()
+                    
+                    temp_tree.grow_specific(n_f)
+                    
+                    # Add grown temp_tree to the new_forest
+                    new_forest.append(temp_tree)
+                    
+            # replace current forest with new_forest
+            self.forest = new_forest
             
         
         # Since initial feature set is larger than n_estimators, select the 
@@ -808,10 +850,16 @@ class EvolvedForest:
         self.forest = sorted(self.forest,key = lambda x : x.validation_score())
         self.forest = self.forest[:self.n_estimators]
         
+        if verbose:
+            print('Phase 2...')
+            
         ### PHASE 2: Build while loop to keep splitting trees until none can 
         ### be split anymore
         while any([tree.changed for tree in self.forest]):
             
+            if verbose:
+                print('\tGenerating seeds...')
+                
             ### PHASE 3: Generate next set of viable splits for each tree and
             ### select best performing splits
             
@@ -834,7 +882,10 @@ class EvolvedForest:
                         # seed_bag should only hold at most n_estimators
                         if len(seed_bag) > self.n_estimators:
                             seed_bag = seed_bag[:self.n_estimators]
-                            
+            
+            if verbose:
+                print('\tDetermining Successors...')
+                
             ### PHASE 4: compare best performing splits with currently optimal
             ### trees
             
@@ -851,6 +902,9 @@ class EvolvedForest:
                                     key = lambda x : x[-1])
             successors = successors[:self.n_estimators]
             
+            if verbose:
+                print('\tGrowing Successors...')
+                
             ### PHASE 5: Grow seeds and create new forest
             
             new_forest = []
@@ -861,9 +915,9 @@ class EvolvedForest:
                 # check whether successor is optimal tree or seed
                 if len(successor) == 3: # seed
                 
-                    # if seed then make a copy of associated tree and split 
+                    # if seed then make a deepcopy of associated tree and split 
                     # nodes in seed
-                    new_tree = copy.copy(self.forest[successor[0]])
+                    new_tree = self.forest[successor[0]].copy()
                     new_tree.grow_seed(successor[1])
                     
                     # add tree to new_forest
@@ -874,7 +928,7 @@ class EvolvedForest:
                     
             self.forest = new_forest
                     
-        return None
+        return self
         
         
     def predict(self,X):
@@ -887,3 +941,12 @@ class EvolvedForest:
         predicted_values = predicted_values/len(self.forest)
         
         return predicted_values
+    
+    
+    def prediction_score(self,X,y):
+        
+        predicted_values = self.predict(X)
+        output = r2_score(y, predicted_values)
+        
+        return output
+        
